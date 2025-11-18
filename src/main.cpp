@@ -79,7 +79,7 @@ static const uint32_t DEBOUNCE_DELAY = 200; // ms
 static lv_obj_t * timer_label;
 static lv_obj_t * mode_label;
 static lv_obj_t * status_label;
-static lv_obj_t * progress_bar;
+static lv_obj_t * progress_arc;
 
 // LVGL tick callback
 static uint32_t my_tick_cb(void)
@@ -143,18 +143,18 @@ static void update_ui()
     // Update status label
     lv_label_set_text(status_label, timer_running ? "RUNNING" : "PAUSED");
     
-    // Update progress bar
+    // Update progress arc
     uint32_t total_duration = get_mode_duration(current_mode);
     int32_t progress = (int32_t)((total_duration - time_remaining) * 100 / total_duration);
-    lv_bar_set_value(progress_bar, progress, LV_ANIM_OFF);
+    lv_arc_set_value(progress_arc, progress);
     
     // Change color based on mode
     if (current_mode == MODE_WORK) {
-        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0xFF6B6B), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(progress_arc, lv_color_hex(0xFF6B6B), LV_PART_INDICATOR);
     } else if (current_mode == MODE_SHORT_BREAK) {
-        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x4ECDC4), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(progress_arc, lv_color_hex(0x4ECDC4), LV_PART_INDICATOR);
     } else {
-        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x95E1D3), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(progress_arc, lv_color_hex(0x95E1D3), LV_PART_INDICATOR);
     }
 }
 
@@ -341,28 +341,36 @@ void setup(void)
   lv_obj_set_style_text_font(mode_label, &lv_font_montserrat_14, 0);
   lv_obj_align(mode_label, LV_ALIGN_TOP_MID, 0, 10);
   
-  // Large timer display in center
+  // Create circular progress arc first (so it appears behind the timer)
+  progress_arc = lv_arc_create(lv_screen_active());
+  lv_obj_set_size(progress_arc, 180, 180);
+  lv_obj_align(progress_arc, LV_ALIGN_CENTER, 0, 0);
+  lv_arc_set_range(progress_arc, 0, 100);
+  lv_arc_set_value(progress_arc, 0);
+  lv_arc_set_bg_angles(progress_arc, 0, 360);
+  lv_obj_remove_style(progress_arc, NULL, LV_PART_KNOB);  // Remove the knob
+  lv_obj_remove_flag(progress_arc, LV_OBJ_FLAG_CLICKABLE); // Make it non-interactive
+  
+  // Style the arc with thicker stroke
+  lv_obj_set_style_arc_width(progress_arc, 12, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(progress_arc, 12, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(progress_arc, lv_color_hex(0xFF6B6B), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(progress_arc, lv_color_hex(0x333333), LV_PART_MAIN);
+  
+  // Large timer display in center (on top of arc)
   timer_label = lv_label_create(lv_screen_active());
   char time_buf[16];
   format_time(time_remaining, time_buf, sizeof(time_buf));
   lv_label_set_text(timer_label, time_buf);
-  // Scale up the timer text by 3x for better visibility
-  lv_obj_set_style_text_font(timer_label, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_transform_scale(timer_label, 300, 0);  // 3x scale
-  lv_obj_align(timer_label, LV_ALIGN_CENTER, 0, -20);
+  // Use larger font and scale for better visibility
+  lv_obj_set_style_text_font(timer_label, &lv_font_montserrat_48, 0);
+  lv_obj_align(timer_label, LV_ALIGN_CENTER, 0, -10);
   
   // Status label
   status_label = lv_label_create(lv_screen_active());
   lv_label_set_text(status_label, "PAUSED");
   lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
   lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 50);
-  
-  // Progress bar
-  progress_bar = lv_bar_create(lv_screen_active());
-  lv_obj_set_size(progress_bar, 200, 15);
-  lv_obj_align(progress_bar, LV_ALIGN_BOTTOM_MID, 0, -55);
-  lv_bar_set_range(progress_bar, 0, 100);
-  lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
   
   // Button instructions
   lv_obj_t * instr_label = lv_label_create(lv_screen_active());
