@@ -231,6 +231,17 @@ void setup(void)
   // Add click event handler to button
   lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, label);
 
+  // Create a horizontal slider below the button
+  lv_obj_t * slider = lv_slider_create(lv_screen_active());
+  lv_obj_set_width(slider, 180);
+  lv_obj_align(slider, LV_ALIGN_CENTER, 0, 100);
+  lv_slider_set_range(slider, 0, 100);
+  lv_slider_set_value(slider, 50, LV_ANIM_OFF);
+  
+  // Style the slider with a different color (blue)
+  lv_obj_set_style_bg_color(slider, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(slider, lv_palette_main(LV_PALETTE_BLUE_GREY), LV_PART_KNOB);
+
   Serial.println("LVGL initialized successfully!");
   Serial.println("Controls:");
   Serial.println("  Button X: Move cursor left/right");
