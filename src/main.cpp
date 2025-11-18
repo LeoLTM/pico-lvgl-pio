@@ -16,10 +16,10 @@ static const int8_t LCD_RST  = -1;    // LCD reset is tied to RUN on the Pico
 static const int8_t LCD_BL   = 20;    // GP20 -> BACKLIGHT_EN
 
 // --- Pico Enviro+ Pack Button pinout ---
-static const int8_t BTN_A = 12;       // GP12 -> Button A (Click)
-static const int8_t BTN_B = 13;       // GP13 -> Button B
-static const int8_t BTN_X = 14;       // GP14 -> Button X (Left/Right)
-static const int8_t BTN_Y = 15;       // GP15 -> Button Y (Up/Down)
+static const int8_t BTN_A = 12;       // GP12 -> Button A (Start/Pause)
+static const int8_t BTN_B = 13;       // GP13 -> Button B (Reset)
+static const int8_t BTN_X = 14;       // GP14 -> Button X (Short Break)
+static const int8_t BTN_Y = 15;       // GP15 -> Button Y (Long Break)
 
 // Display dimensions
 #define TFT_HOR_RES 240
@@ -50,16 +50,36 @@ static lv_display_t * disp;
 static lv_color_t * buf1;
 static lv_color_t * buf2;
 
-// LVGL input device
-static lv_indev_t * indev;
+// Pomodoro Timer Settings (in seconds for testing, change to minutes * 60 for production)
+enum TimerMode {
+    MODE_WORK = 0,
+    MODE_SHORT_BREAK = 1,
+    MODE_LONG_BREAK = 2
+};
 
-// Virtual cursor position
-static int16_t cursor_x = TFT_HOR_RES / 2;
-static int16_t cursor_y = TFT_VER_RES / 2;
-static const int16_t cursor_step = 5;  // Pixels to move per button press
+static const uint32_t WORK_DURATION = 25 * 60;        // 25 minutes
+static const uint32_t SHORT_BREAK_DURATION = 5 * 60;  // 5 minutes
+static const uint32_t LONG_BREAK_DURATION = 15 * 60;  // 15 minutes
 
-// Button state tracking (only for button A click detection)
+// Timer state
+static TimerMode current_mode = MODE_WORK;
+static uint32_t time_remaining = WORK_DURATION;
+static uint32_t last_tick_time = 0;
+static bool timer_running = false;
+
+// Button debouncing
 static bool btn_a_last = false;
+static bool btn_b_last = false;
+static bool btn_x_last = false;
+static bool btn_y_last = false;
+static uint32_t last_button_time = 0;
+static const uint32_t DEBOUNCE_DELAY = 200; // ms
+
+// UI objects
+static lv_obj_t * timer_label;
+static lv_obj_t * mode_label;
+static lv_obj_t * status_label;
+static lv_obj_t * progress_bar;
 
 // LVGL tick callback
 static uint32_t my_tick_cb(void)
@@ -79,61 +99,185 @@ static void my_flush_cb(lv_display_t * display, const lv_area_t * area, uint8_t 
     lv_display_flush_ready(display);
 }
 
-// LVGL input device read callback for virtual cursor
-static void my_input_read_cb(lv_indev_t * indev, lv_indev_data_t * data)
+// Format time in MM:SS format
+static void format_time(uint32_t seconds, char* buf, size_t buf_size)
 {
-    // Read button states (buttons are active LOW with internal pull-up)
-    bool btn_a = !digitalRead(BTN_A);  // Click
-    bool btn_x = !digitalRead(BTN_X);  // Right
-    bool btn_y = !digitalRead(BTN_Y);  // Down
-    bool btn_b = !digitalRead(BTN_B);  // Extra button
-    
-    // Update cursor position based on X button (horizontal movement)
-    // Holding X moves cursor right continuously
-    if (btn_x) {
-        cursor_x += cursor_step;
-    }
-    
-    // Update cursor position based on Y button (vertical movement)
-    // Holding Y moves cursor down continuously
-    if (btn_y) {
-        cursor_y += cursor_step;
-    }
-    
-    // Wrap cursor around screen edges
-    if (cursor_x < 0) cursor_x = TFT_HOR_RES - 1;
-    if (cursor_x >= TFT_HOR_RES) cursor_x = 0;
-    if (cursor_y < 0) cursor_y = TFT_VER_RES - 1;
-    if (cursor_y >= TFT_VER_RES) cursor_y = 0;
-    
-    // Set cursor position
-    data->point.x = cursor_x;
-    data->point.y = cursor_y;
-    
-    // Set button state (Button A is click)
-    data->state = btn_a ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-    
-    // Debug output on button A state change
-    if (btn_a && !btn_a_last) {
-        Serial.printf("Click at (%d, %d)\n", cursor_x, cursor_y);
-    }
-    btn_a_last = btn_a;
+    uint32_t minutes = seconds / 60;
+    uint32_t secs = seconds % 60;
+    snprintf(buf, buf_size, "%02lu:%02lu", minutes, secs);
 }
 
-// Button click event handler
-static void btn_event_cb(lv_event_t * e)
+// Get mode name
+static const char* get_mode_name(TimerMode mode)
 {
-    lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t * label = (lv_obj_t *)lv_event_get_user_data(e);
+    switch(mode) {
+        case MODE_WORK: return "WORK TIME";
+        case MODE_SHORT_BREAK: return "SHORT BREAK";
+        case MODE_LONG_BREAK: return "LONG BREAK";
+        default: return "UNKNOWN";
+    }
+}
+
+// Get mode duration
+static uint32_t get_mode_duration(TimerMode mode)
+{
+    switch(mode) {
+        case MODE_WORK: return WORK_DURATION;
+        case MODE_SHORT_BREAK: return SHORT_BREAK_DURATION;
+        case MODE_LONG_BREAK: return LONG_BREAK_DURATION;
+        default: return WORK_DURATION;
+    }
+}
+
+// Update UI with current timer state
+static void update_ui()
+{
+    // Update timer display
+    char time_buf[16];
+    format_time(time_remaining, time_buf, sizeof(time_buf));
+    lv_label_set_text(timer_label, time_buf);
     
-    static int click_count = 0;
-    click_count++;
+    // Update mode label
+    lv_label_set_text(mode_label, get_mode_name(current_mode));
     
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Clicked %d times!", click_count);
-    lv_label_set_text(label, buf);
+    // Update status label
+    lv_label_set_text(status_label, timer_running ? "RUNNING" : "PAUSED");
     
-    Serial.printf("Button clicked! Count: %d\n", click_count);
+    // Update progress bar
+    uint32_t total_duration = get_mode_duration(current_mode);
+    int32_t progress = (int32_t)((total_duration - time_remaining) * 100 / total_duration);
+    lv_bar_set_value(progress_bar, progress, LV_ANIM_OFF);
+    
+    // Change color based on mode
+    if (current_mode == MODE_WORK) {
+        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0xFF6B6B), LV_PART_INDICATOR);
+    } else if (current_mode == MODE_SHORT_BREAK) {
+        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x4ECDC4), LV_PART_INDICATOR);
+    } else {
+        lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x95E1D3), LV_PART_INDICATOR);
+    }
+}
+
+// Start/pause timer (Button A)
+static void start_pause_timer()
+{
+    timer_running = !timer_running;
+    if (timer_running) {
+        last_tick_time = millis();
+        Serial.println("Timer started");
+    } else {
+        Serial.println("Timer paused");
+    }
+    update_ui();
+}
+
+// Reset timer (Button B)
+static void reset_timer()
+{
+    timer_running = false;
+    time_remaining = get_mode_duration(current_mode);
+    Serial.println("Timer reset");
+    update_ui();
+}
+
+// Switch to short break (Button X)
+static void set_short_break()
+{
+    current_mode = MODE_SHORT_BREAK;
+    timer_running = false;
+    time_remaining = SHORT_BREAK_DURATION;
+    Serial.println("Switched to short break");
+    update_ui();
+}
+
+// Switch to long break (Button Y)
+static void set_long_break()
+{
+    current_mode = MODE_LONG_BREAK;
+    timer_running = false;
+    time_remaining = LONG_BREAK_DURATION;
+    Serial.println("Switched to long break");
+    update_ui();
+}
+
+// Handle button inputs with debouncing
+static void handle_buttons()
+{
+    uint32_t current_time = millis();
+    
+    // Only check buttons if enough time has passed since last press
+    if (current_time - last_button_time < DEBOUNCE_DELAY) {
+        return;
+    }
+    
+    // Read button states (active LOW with pull-up)
+    bool btn_a = !digitalRead(BTN_A);
+    bool btn_b = !digitalRead(BTN_B);
+    bool btn_x = !digitalRead(BTN_X);
+    bool btn_y = !digitalRead(BTN_Y);
+    
+    // Detect button presses (rising edge)
+    if (btn_a && !btn_a_last) {
+        start_pause_timer();
+        last_button_time = current_time;
+    }
+    
+    if (btn_b && !btn_b_last) {
+        reset_timer();
+        last_button_time = current_time;
+    }
+    
+    if (btn_x && !btn_x_last) {
+        set_short_break();
+        last_button_time = current_time;
+    }
+    
+    if (btn_y && !btn_y_last) {
+        set_long_break();
+        last_button_time = current_time;
+    }
+    
+    // Update button states
+    btn_a_last = btn_a;
+    btn_b_last = btn_b;
+    btn_x_last = btn_x;
+    btn_y_last = btn_y;
+}
+
+// Update timer countdown
+static void update_timer()
+{
+    if (!timer_running) {
+        return;
+    }
+    
+    uint32_t current_time = millis();
+    uint32_t elapsed = (current_time - last_tick_time) / 1000; // Convert to seconds
+    
+    if (elapsed >= 1) {
+        last_tick_time = current_time;
+        
+        if (time_remaining > 0) {
+            time_remaining--;
+            update_ui();
+        } else {
+            // Timer finished
+            timer_running = false;
+            Serial.println("Timer finished!");
+            
+            // Auto-switch mode
+            if (current_mode == MODE_WORK) {
+                current_mode = MODE_SHORT_BREAK;
+                time_remaining = SHORT_BREAK_DURATION;
+                Serial.println("Switching to short break");
+            } else {
+                current_mode = MODE_WORK;
+                time_remaining = WORK_DURATION;
+                Serial.println("Switching to work time");
+            }
+            update_ui();
+        }
+    }
 }
 
 void setup(void)
@@ -145,7 +289,7 @@ void setup(void)
   Serial.begin(115200);
   // Serial.setDebugOutput(true);
   // while(!Serial);
-  Serial.println("LVGL with ArduinoGFX example");
+  Serial.println("Pomodoro Timer with LVGL");
 
   // Init buttons with internal pull-ups (buttons are active LOW)
   pinMode(BTN_A, INPUT_PULLUP);
@@ -190,56 +334,65 @@ void setup(void)
   // Set the flush callback
   lv_display_set_flush_cb(disp, my_flush_cb);
 
-  // Create input device for virtual cursor
-  indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  lv_indev_set_read_cb(indev, my_input_read_cb);
-
-  // Create a custom cursor (black circle)
-  lv_obj_t * cursor_obj = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(cursor_obj, 12, 12);
-  lv_obj_set_style_radius(cursor_obj, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(cursor_obj, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(cursor_obj, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(cursor_obj, 2, 0);
-  lv_obj_set_style_border_color(cursor_obj, lv_color_white(), 0);
-  lv_obj_set_style_border_opa(cursor_obj, LV_OPA_COVER, 0);
-  lv_obj_remove_flag(cursor_obj, LV_OBJ_FLAG_CLICKABLE);
+  // Create Pomodoro Timer UI
+  // Mode label at top
+  mode_label = lv_label_create(lv_screen_active());
+  lv_label_set_text(mode_label, get_mode_name(current_mode));
+  lv_obj_set_style_text_font(mode_label, &lv_font_montserrat_14, 0);
+  lv_obj_align(mode_label, LV_ALIGN_TOP_MID, 0, 10);
   
-  // Set the custom cursor for the input device
-  lv_indev_set_cursor(indev, cursor_obj);
+  // Large timer display in center
+  timer_label = lv_label_create(lv_screen_active());
+  char time_buf[16];
+  format_time(time_remaining, time_buf, sizeof(time_buf));
+  lv_label_set_text(timer_label, time_buf);
+  // Scale up the timer text by 3x for better visibility
+  lv_obj_set_style_text_font(timer_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_transform_scale(timer_label, 300, 0);  // 3x scale
+  lv_obj_align(timer_label, LV_ALIGN_CENTER, 0, -20);
   
-  // Position cursor at center of screen initially
-  lv_obj_set_pos(cursor_obj, cursor_x - 6, cursor_y - 6);  // -6 to center the 12px cursor
-
-  // Create a simple UI
-  // Create a label
-  lv_obj_t * label = lv_label_create(lv_screen_active());
-  lv_label_set_text(label, "Use X/Y to move\nButton A to click");
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
-
-  // Create a button
-  lv_obj_t * btn = lv_button_create(lv_screen_active());
-  lv_obj_set_size(btn, 120, 50);
-  lv_obj_align(btn, LV_ALIGN_CENTER, 0, 40);
-
-  // Create a label on the button
-  lv_obj_t * btn_label = lv_label_create(btn);
-  lv_label_set_text(btn_label, "Click Me!");
-  lv_obj_center(btn_label);
+  // Status label
+  status_label = lv_label_create(lv_screen_active());
+  lv_label_set_text(status_label, "PAUSED");
+  lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+  lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 50);
   
-  // Add click event handler to button
-  lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, label);
+  // Progress bar
+  progress_bar = lv_bar_create(lv_screen_active());
+  lv_obj_set_size(progress_bar, 200, 15);
+  lv_obj_align(progress_bar, LV_ALIGN_BOTTOM_MID, 0, -55);
+  lv_bar_set_range(progress_bar, 0, 100);
+  lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
+  
+  // Button instructions
+  lv_obj_t * instr_label = lv_label_create(lv_screen_active());
+  lv_label_set_text(instr_label, 
+    "A: Start/Pause | B: Reset\n"
+    "X: Short Break | Y: Long Break");
+  lv_obj_set_style_text_font(instr_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_align(instr_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(instr_label, LV_ALIGN_BOTTOM_MID, 0, -5);
+  
+  // Initialize timer
+  last_tick_time = millis();
+  update_ui();
 
-  Serial.println("LVGL initialized successfully!");
+  Serial.println("Pomodoro Timer initialized!");
   Serial.println("Controls:");
-  Serial.println("  Button X: Move cursor left/right");
-  Serial.println("  Button Y: Move cursor up/down");
-  Serial.println("  Button A: Click");
+  Serial.println("  Button A: Start/Pause");
+  Serial.println("  Button B: Reset");
+  Serial.println("  Button X: Short Break (5 min)");
+  Serial.println("  Button Y: Long Break (15 min)");
 }
 
 void loop()
 {
+  // Handle button inputs
+  handle_buttons();
+  
+  // Update timer countdown
+  update_timer();
+  
   // Handle LVGL tasks
   lv_timer_handler();
   delay(5); // Small delay to let the system breathe
