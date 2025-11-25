@@ -288,7 +288,7 @@ void setup(void)
 
   Serial.begin(115200);
   // Serial.setDebugOutput(true);
-  // while(!Serial);
+  while(!Serial);
   Serial.println("Pomodoro Timer with LVGL");
 
   // Init buttons with internal pull-ups (buttons are active LOW)
