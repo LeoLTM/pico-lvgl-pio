@@ -1,4 +1,4 @@
-# better smart cube
+# PIO + LVGL + RPi Pico Boilerplate
 
 
 
